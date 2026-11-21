@@ -9,10 +9,7 @@
     "Unity.Scenes",
     "Unity.Transforms",
     "XO.RuntimeDatabase",
-    "XO.RuntimeDatabase.Authoring",
-    "XO.PopUtils",
-    "XO.Curve",
-    "XO.Entityween.Runtime"
+    "XO.RuntimeDatabase.Authoring"
   ],
   "includePlatforms": [
     "Editor"
