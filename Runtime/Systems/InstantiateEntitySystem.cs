@@ -3,22 +3,20 @@ using Unity.Collections;
 using Unity.Entities;
 using Unity.Entities.Serialization;
 using Unity.Scenes;
-using Unity.Transforms;
 using UnityEngine;
-using XO.PopUtils;
 
 namespace XO.RuntimeDatabase
 {
     public partial struct InstantiateEntitySystem : ISystem
     {
         public NativeHashMap<ulong, Entity> PrefabCache;
-        public NativeHashSet<ulong> CurrentlyLoading;
+        public NativeHashMap<ulong, Entity> CurrentlyLoading;
 
         [BurstCompile]
         public void OnCreate(ref SystemState state)
         {
             PrefabCache = new NativeHashMap<ulong, Entity>(16, Allocator.Persistent);
-            CurrentlyLoading = new NativeHashSet<ulong>(16, Allocator.Persistent);
+            CurrentlyLoading = new NativeHashMap<ulong, Entity>(16, Allocator.Persistent);
             state.RequireForUpdate<InstantiateEntityPrefabCall>();
         }
 
@@ -33,54 +31,44 @@ namespace XO.RuntimeDatabase
         public void OnUpdate(ref SystemState state)
         {
             if (!PrefabCache.IsCreated)
-            {
                 PrefabCache = new NativeHashMap<ulong, Entity>(16, Allocator.Persistent);
-            }
             if (!CurrentlyLoading.IsCreated)
-            {
-                CurrentlyLoading = new NativeHashSet<ulong>(16, Allocator.Persistent);
-            }
+                CurrentlyLoading = new NativeHashMap<ulong, Entity>(16, Allocator.Persistent);
+
+            var em = state.EntityManager;
+            CleanupStaleLoadingRequests(em);
 
             bool hasDatabase = SystemAPI.TryGetSingleton<RuntimeTable<EntityPrefabReference>>(out var database);
-            var em = state.EntityManager;
+            bool hasCatalog = SystemAPI.TryGetSingletonBuffer<PrefabCatalogElement>(out var catalog);
+
             var ecb = new EntityCommandBuffer(Allocator.Temp);
             var readyCalls = new NativeList<InstantiateCallData>(Allocator.Temp);
 
-            // 0. Process auto-baked prefabs from buffer into cache
-            foreach (var (buffer, bufferEntity) in
-                     SystemAPI.Query<DynamicBuffer<LoadedEntityPrefabBuffer>>()
-                         .WithEntityAccess())
-            {
-                for (int i = 0; i < buffer.Length; i++)
-                {
-                    var entry = buffer[i];
-                    var cacheKey = ((ulong)entry.TableKey << 32) | entry.Key;
-                    PrefabCache.TryAdd(cacheKey, entry.Prefab);
-                }
-                ecb.RemoveComponent<LoadedEntityPrefabBuffer>(bufferEntity);
-            }
-
-            DynamicBuffer<PrefabCatalogElement> catalog = default;
-            bool hasCatalog = SystemAPI.TryGetSingletonBuffer<PrefabCatalogElement>(out catalog);
-
-            // 1. Process instantiation calls
+            // 1. Process new instantiation calls
             foreach (var (call, entity) in
                      SystemAPI.Query<RefRO<InstantiateEntityPrefabCall>>()
                          .WithNone<RequestEntityPrefabLoaded>()
                          .WithEntityAccess())
             {
-                var cacheKey = ((ulong)call.ValueRO.TableKey << 32) | call.ValueRO.Key;
-                var isCached = PrefabCache.TryGetValue(cacheKey, out var prefab);
+                if (call.ValueRO.InstantiateCount <= 0)
+                {
+                    ecb.RemoveComponent<InstantiateEntityPrefabCall>(entity);
+                    continue;
+                }
+
+                var cacheKey = RuntimeDB.PackCacheKey(call.ValueRO.TableKey, call.ValueRO.Key);
+                bool isCached = PrefabCache.TryGetValue(cacheKey, out var prefab) && em.Exists(prefab);
+
                 if (!isCached && hasCatalog)
                 {
                     isCached = catalog.TryGetPrefab(call.ValueRO.TableKey, call.ValueRO.Key, out prefab);
-                    if (!isCached)
+                    if (isCached && em.Exists(prefab))
                     {
-                        isCached = catalog.TryGetPrefab(call.ValueRO.Key, out prefab);
+                        PrefabCache[cacheKey] = prefab;
                     }
-                    if (isCached)
+                    else
                     {
-                        PrefabCache.TryAdd(cacheKey, prefab);
+                        isCached = false;
                     }
                 }
 
@@ -92,45 +80,53 @@ namespace XO.RuntimeDatabase
                         PrefabRoot = prefab,
                         Call = call.ValueRO
                     });
+                    continue;
                 }
-                else
+
+                // Skip starting a duplicate async load if already in flight
+                if (CurrentlyLoading.ContainsKey(cacheKey))
                 {
-                    // If this key is already being loaded asynchronously, skip starting a new loading stream
-                    if (CurrentlyLoading.Contains(cacheKey))
-                    {
-                        continue;
-                    }
-
-                    EntityPrefabReference entityPrefab = default;
-                    var prefabValid = hasDatabase && database.TryGetValue(call.ValueRO.TableKey, call.ValueRO.Key, out entityPrefab);
-                    if (!prefabValid)
-                    {
-                        Debug.LogError($"Prefab with key {call.ValueRO.Key} under table {call.ValueRO.TableKey} not found in database or catalog");
-                        continue;
-                    }
-
-                    CurrentlyLoading.Add(cacheKey);
-                    var request = new RequestEntityPrefabLoaded { Prefab = entityPrefab };
-                    ecb.AddComponent(entity, request);
+                    continue;
                 }
+
+                if (!hasDatabase || !database.TryGetValue(call.ValueRO.TableKey, call.ValueRO.Key, out var entityPrefab))
+                {
+                    var msg = new FixedString128Bytes();
+                    msg.Append("[RuntimeDB] Prefab not found. TableKey=");
+                    msg.Append(call.ValueRO.TableKey);
+                    msg.Append(", Key=");
+                    msg.Append(call.ValueRO.Key);
+                    Debug.LogError(msg);
+                    ecb.RemoveComponent<InstantiateEntityPrefabCall>(entity);
+                    continue;
+                }
+
+                CurrentlyLoading.TryAdd(cacheKey, entity);
+                ecb.AddComponent(entity, new RequestEntityPrefabLoaded { Prefab = entityPrefab });
             }
 
-            // 2. Process finished loading results
+            // 2. Process finished async prefab loads
             foreach (var (result, call, entity) in
                      SystemAPI.Query<RefRO<PrefabLoadResult>, RefRO<InstantiateEntityPrefabCall>>()
                          .WithEntityAccess())
             {
-                var cacheKey = ((ulong)call.ValueRO.TableKey << 32) | call.ValueRO.Key;
-                // Cache the loaded prefab root so all subsequent calls can reuse it instantly
-                PrefabCache.TryAdd(cacheKey, result.ValueRO.PrefabRoot);
+                var cacheKey = RuntimeDB.PackCacheKey(call.ValueRO.TableKey, call.ValueRO.Key);
+                PrefabCache[cacheKey] = result.ValueRO.PrefabRoot;
                 CurrentlyLoading.Remove(cacheKey);
 
-                readyCalls.Add(new InstantiateCallData
+                if (call.ValueRO.InstantiateCount > 0)
                 {
-                    CallEntity = entity,
-                    PrefabRoot = result.ValueRO.PrefabRoot,
-                    Call = call.ValueRO
-                });
+                    readyCalls.Add(new InstantiateCallData
+                    {
+                        CallEntity = entity,
+                        PrefabRoot = result.ValueRO.PrefabRoot,
+                        Call = call.ValueRO
+                    });
+                }
+                else
+                {
+                    ecb.RemoveComponent<InstantiateEntityPrefabCall>(entity);
+                }
 
                 ecb.RemoveComponent<RequestEntityPrefabLoaded>(entity);
                 ecb.RemoveComponent<PrefabLoadResult>(entity);
@@ -139,11 +135,11 @@ namespace XO.RuntimeDatabase
             ecb.Playback(em);
             ecb.Dispose();
 
-            // 3. Process instantiations directly via EntityManager so buffer contains real entity references
+            // 3. Instantiate directly via EntityManager so result buffer contains real Entity references
             if (readyCalls.Length > 0)
             {
                 var sharedCallbackEcb = new EntityCommandBuffer(Allocator.Temp);
-                for (var i = 0; i < readyCalls.Length; i++)
+                for (int i = 0; i < readyCalls.Length; i++)
                 {
                     var item = readyCalls[i];
                     HandleInstantiateCall(em, sharedCallbackEcb, item.CallEntity, item.PrefabRoot, item.Call);
@@ -151,32 +147,58 @@ namespace XO.RuntimeDatabase
                 sharedCallbackEcb.Playback(em);
                 sharedCallbackEcb.Dispose();
             }
+
             readyCalls.Dispose();
         }
 
-        private void HandleInstantiateCall(EntityManager em, EntityCommandBuffer sharedCallbackEcb, Entity callEntity,
+        private void CleanupStaleLoadingRequests(EntityManager em)
+        {
+            if (CurrentlyLoading.Count == 0) return;
+
+            var staleKeys = new NativeList<ulong>(Allocator.Temp);
+            foreach (var kvp in CurrentlyLoading)
+            {
+                var loadingEntity = kvp.Value;
+                if (!em.Exists(loadingEntity) || !em.HasComponent<RequestEntityPrefabLoaded>(loadingEntity))
+                {
+                    staleKeys.Add(kvp.Key);
+                }
+            }
+
+            for (int i = 0; i < staleKeys.Length; i++)
+            {
+                CurrentlyLoading.Remove(staleKeys[i]);
+            }
+
+            staleKeys.Dispose();
+        }
+
+        private static void HandleInstantiateCall(
+            EntityManager em,
+            EntityCommandBuffer sharedCallbackEcb,
+            Entity callEntity,
             Entity prefabRoot,
             InstantiateEntityPrefabCall call)
         {
-            if (!em.Exists(callEntity) || !em.Exists(prefabRoot)) return;
+            if (!em.Exists(callEntity) || !em.Exists(prefabRoot) || call.InstantiateCount <= 0)
+                return;
 
             var entities = new NativeArray<Entity>(call.InstantiateCount, Allocator.Temp);
 
-            for (var i = 0; i < call.InstantiateCount; i++)
+            for (int i = 0; i < call.InstantiateCount; i++)
             {
                 var entity = em.Instantiate(prefabRoot);
-                var parent = call.Parent;
-                if (em.Exists(parent))
+                if (em.Exists(call.Parent))
                 {
-                    em.SetParent(entity, parent);
+                    RuntimeDB.SetParent(em, entity, call.Parent);
                 }
 
                 em.SetComponentData(entity, call.Transform);
                 entities[i] = entity;
 
-                if (call.OnInstantiate != null)
+                if (call.OnInstantiate.IsCreated)
                 {
-                    call.OnInstantiate.Value.Invoke(sharedCallbackEcb, entity, i);
+                    call.OnInstantiate.Invoke(sharedCallbackEcb, entity, i);
                 }
             }
 
@@ -184,7 +206,7 @@ namespace XO.RuntimeDatabase
                 ? em.GetBuffer<InstantiateEntityPrefabResult>(callEntity)
                 : em.AddBuffer<InstantiateEntityPrefabResult>(callEntity);
             resultBuffer.Clear();
-            for (var i = 0; i < entities.Length; i++)
+            for (int i = 0; i < entities.Length; i++)
             {
                 resultBuffer.Add(new InstantiateEntityPrefabResult(entities[i], i));
             }
@@ -197,13 +219,9 @@ namespace XO.RuntimeDatabase
         public void OnDestroy(ref SystemState state)
         {
             if (PrefabCache.IsCreated)
-            {
                 PrefabCache.Dispose();
-            }
             if (CurrentlyLoading.IsCreated)
-            {
                 CurrentlyLoading.Dispose();
-            }
         }
     }
 }
