@@ -1,19 +1,16 @@
 using System;
 using System.Collections.Generic;
-using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
-using XO.RuntimeDatabase;
 
 namespace XO.RuntimeDatabase.Authoring
 {
     /// <summary>
-    /// Central authoring component for the RuntimeDatabase module.
+    /// Central authoring component for the RuntimeDatabase package.
     /// Dynamically groups and bakes:
-    /// 1. Unmanaged Data Tables (RuntimeTable<TDots>) with zero hardcoding
-    /// 2. Synchronous Prefab Catalog (RuntimePrefabCatalog) for direct zero-latency ECS spawning
-    /// 3. Asynchronous Streaming Prefab Tables (EntityPrefabReference)
-    /// 4. Direct SubScene Live Entity Baking (IRuntimeEntityBakeTable)
+    /// 1. Unmanaged Data Tables (RuntimeTable&lt;TDots&gt;) with zero hardcoding
+    /// 2. Sorted Synchronous Prefab Catalog (PrefabCatalogElement) for direct zero-latency ECS spawning
+    /// 3. Direct SubScene Live Entity Baking (IRuntimeEntityBakeTable)
     /// </summary>
     public class RuntimeDatabaseAuthoring : MonoBehaviour
     {
@@ -27,7 +24,6 @@ namespace XO.RuntimeDatabase.Authoring
                 var entity = GetEntity(TransformUsageFlags.None);
                 if (authoring.tables == null || authoring.tables.Count == 0) return;
 
-                // 1. Group tables dynamically by capabilities and TDots type!
                 var dataTableGroups = new Dictionary<Type, List<IRuntimeDataTable>>();
                 var prefabTables = new List<IRuntimePrefabTable>();
                 var entityBakeTables = new List<IRuntimeEntityBakeTable>();
@@ -61,7 +57,7 @@ namespace XO.RuntimeDatabase.Authoring
                     }
                 }
 
-                // 2. Bake unmanaged Data Tables (One RuntimeTable<TDots> singleton per distinct TDots type)
+                // 1. Bake unmanaged Data Tables (one RuntimeTable<TDots> singleton per distinct TDots type)
                 foreach (var kvp in dataTableGroups)
                 {
                     var group = kvp.Value;
@@ -71,23 +67,26 @@ namespace XO.RuntimeDatabase.Authoring
                     }
                 }
 
-                // 3. Bake Synchronous Prefab Catalog (Immediate Burst-ready ecb.Instantiate access)
+                // 2. Bake sorted Synchronous Prefab Catalog
                 if (prefabTables.Count > 0)
                 {
                     BakePrefabCatalog(entity, prefabTables);
                 }
 
-                // 4. Bake Live SubScene Entities (Direct BakeEntity Mode)
+                // 3. Bake Live SubScene Entities
                 for (int i = 0; i < entityBakeTables.Count; i++)
                 {
                     entityBakeTables[i].BakeEntities(this);
                 }
 
-                // 5. Standalone legacy self-baking tables
+                // 4. Standalone custom self-baking tables
                 for (int i = 0; i < authoring.tables.Count; i++)
                 {
                     var table = authoring.tables[i];
-                    if (table != null && !(table is IRuntimeDataTable) && !(table is IRuntimePrefabTable))
+                    if (table != null
+                        && table is not IRuntimeDataTable
+                        && table is not IRuntimePrefabTable
+                        && table is not IRuntimeEntityBakeTable)
                     {
                         table.BakeTable(this, entity);
                     }
@@ -97,14 +96,13 @@ namespace XO.RuntimeDatabase.Authoring
             private void BakePrefabCatalog(Entity entity, List<IRuntimePrefabTable> prefabTables)
             {
                 var allPrefabs = new List<PrefabEntryMetadata>();
+                var subList = new List<PrefabEntryMetadata>();
 
                 for (int i = 0; i < prefabTables.Count; i++)
                 {
                     var table = prefabTables[i];
-                    var subList = new List<PrefabEntryMetadata>();
+                    subList.Clear();
                     table.CollectPrefabs(this, subList);
-
-                    if (subList.Count == 0) continue;
 
                     for (int j = 0; j < subList.Count; j++)
                     {
@@ -118,6 +116,13 @@ namespace XO.RuntimeDatabase.Authoring
                 }
 
                 if (allPrefabs.Count == 0) return;
+
+                // Sort by (TableKey, PrefabKey) to enable O(log N) binary search at runtime
+                allPrefabs.Sort((a, b) =>
+                {
+                    int cmp = a.TableKey.CompareTo(b.TableKey);
+                    return cmp != 0 ? cmp : a.PrefabKey.CompareTo(b.PrefabKey);
+                });
 
                 var catalogBuffer = AddBuffer<PrefabCatalogElement>(entity);
                 for (int i = 0; i < allPrefabs.Count; i++)

@@ -1,7 +1,5 @@
-using System;
-using Unity.Burst;
+using System.Runtime.CompilerServices;
 using Unity.Entities;
-using XO.PopUtils;
 
 namespace XO.RuntimeDatabase
 {
@@ -24,33 +22,39 @@ namespace XO.RuntimeDatabase
         public BlobArray<EntryMetadata<TValue>> Entries;
     }
 
-    [BurstCompile]
     public struct RuntimeTable<TValue> : IComponentData where TValue : unmanaged
     {
         public BlobAssetReference<RuntimeDatabaseBlob<TValue>> Blob;
 
-        public int Count => Blob.IsCreated ? Blob.Value.Tables.Length : 0;
-        public TValue this[string tableKey, string objectKey] => this[Pop.Hash32(tableKey), Pop.Hash32(objectKey)];
-        public TValue this[uint tableKey, uint objectKey] => TryGetValue(tableKey, objectKey, out var value) ? value : default;
+        public bool IsCreated => Blob.IsCreated;
+        public int TableCount => Blob.IsCreated ? Blob.Value.Tables.Length : 0;
+        public int EntryCount => Blob.IsCreated ? Blob.Value.Entries.Length : 0;
+        public int Count => TableCount;
+
+        public TValue this[string tableKey, string objectKey] =>
+            this[RuntimeDB.Hash32(tableKey), RuntimeDB.Hash32(objectKey)];
+
+        public TValue this[uint tableKey, uint objectKey] =>
+            TryGetValue(tableKey, objectKey, out var value) ? value : default;
 
         public RuntimeTable(BlobAssetReference<RuntimeDatabaseBlob<TValue>> blob)
         {
             Blob = blob;
         }
 
-        [BurstCompile]
-        public bool Contains(uint tableKey, uint objectKey)
-        {
-            return TryGetValue(tableKey, objectKey, out _);
-        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool Contains(uint tableKey, uint objectKey) => TryGetValue(tableKey, objectKey, out _);
 
-        [BurstCompile]
-        public bool Contains(uint objectKey)
-        {
-            return TryGetValue(objectKey, out _);
-        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool Contains(uint objectKey) => TryGetValue(objectKey, out _);
 
-        [BurstCompile]
+        public bool TryGetValue(string tableKey, string objectKey, out TValue value) =>
+            TryGetValue(RuntimeDB.Hash32(tableKey), RuntimeDB.Hash32(objectKey), out value);
+
+        public bool TryGetValue(string objectKey, out TValue value) =>
+            TryGetValue(RuntimeDB.Hash32(objectKey), out value);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryGetValue(uint objectKey, out TValue value)
         {
             if (!Blob.IsCreated)
@@ -59,58 +63,16 @@ namespace XO.RuntimeDatabase
                 return false;
             }
 
-            ref var tables = ref Blob.Value.Tables;
-            int tableCount = tables.Length;
-            if (tableCount == 0)
-            {
-                value = default;
-                return false;
-            }
+            ref var root = ref Blob.Value;
+            ref var tables = ref root.Tables;
+            ref var entries = ref root.Entries;
 
-            // Fast path for single-table databases: direct binary search
-            if (tableCount == 1)
-            {
-                ref var tableMeta = ref tables[0];
-                ref var entries = ref Blob.Value.Entries;
-                int low = tableMeta.StartIndex;
-                int high = tableMeta.StartIndex + tableMeta.Count - 1;
-
-                while (low <= high)
-                {
-                    int mid = (low + high) >> 1;
-                    uint midKey = entries[mid].ObjectKey;
-                    if (midKey == objectKey)
-                    {
-                        value = entries[mid].Value;
-                        return true;
-                    }
-                    if (midKey < objectKey) low = mid + 1;
-                    else high = mid - 1;
-                }
-
-                value = default;
-                return false;
-            }
-
-            // Search across all tables
-            for (int t = 0; t < tableCount; t++)
+            for (int t = 0; t < tables.Length; t++)
             {
                 ref var tableMeta = ref tables[t];
-                ref var entries = ref Blob.Value.Entries;
-                int low = tableMeta.StartIndex;
-                int high = tableMeta.StartIndex + tableMeta.Count - 1;
-
-                while (low <= high)
+                if (BinarySearchEntry(ref entries, tableMeta.StartIndex, tableMeta.Count, objectKey, out value))
                 {
-                    int mid = (low + high) >> 1;
-                    uint midKey = entries[mid].ObjectKey;
-                    if (midKey == objectKey)
-                    {
-                        value = entries[mid].Value;
-                        return true;
-                    }
-                    if (midKey < objectKey) low = mid + 1;
-                    else high = mid - 1;
+                    return true;
                 }
             }
 
@@ -118,7 +80,7 @@ namespace XO.RuntimeDatabase
             return false;
         }
 
-        [BurstCompile]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryGetValue(uint tableKey, uint objectKey, out TValue value)
         {
             if (!Blob.IsCreated)
@@ -127,40 +89,46 @@ namespace XO.RuntimeDatabase
                 return false;
             }
 
-            ref var tables = ref Blob.Value.Tables;
-            int low = 0;
-            int high = tables.Length - 1;
-            int tableIdx = -1;
-
-            while (low <= high)
-            {
-                int mid = (low + high) >> 1;
-                uint midKey = tables[mid].TableKey;
-                if (midKey == tableKey)
-                {
-                    tableIdx = mid;
-                    break;
-                }
-                else if (midKey < tableKey)
-                {
-                    low = mid + 1;
-                }
-                else
-                {
-                    high = mid - 1;
-                }
-            }
-
-            if (tableIdx == -1)
+            ref var root = ref Blob.Value;
+            int tableIdx = BinarySearchTable(ref root.Tables, tableKey);
+            if (tableIdx < 0)
             {
                 value = default;
                 return false;
             }
 
-            ref var tableMeta = ref tables[tableIdx];
-            ref var entries = ref Blob.Value.Entries;
-            low = tableMeta.StartIndex;
-            high = tableMeta.StartIndex + tableMeta.Count - 1;
+            ref var tableMeta = ref root.Tables[tableIdx];
+            return BinarySearchEntry(ref root.Entries, tableMeta.StartIndex, tableMeta.Count, objectKey, out value);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int BinarySearchTable(ref BlobArray<TableMetadata> tables, uint tableKey)
+        {
+            int low = 0;
+            int high = tables.Length - 1;
+
+            while (low <= high)
+            {
+                int mid = (low + high) >> 1;
+                uint midKey = tables[mid].TableKey;
+                if (midKey == tableKey) return mid;
+                if (midKey < tableKey) low = mid + 1;
+                else high = mid - 1;
+            }
+
+            return -1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool BinarySearchEntry(
+            ref BlobArray<EntryMetadata<TValue>> entries,
+            int startIndex,
+            int count,
+            uint objectKey,
+            out TValue value)
+        {
+            int low = startIndex;
+            int high = startIndex + count - 1;
 
             while (low <= high)
             {
@@ -171,14 +139,8 @@ namespace XO.RuntimeDatabase
                     value = entries[mid].Value;
                     return true;
                 }
-                else if (midKey < objectKey)
-                {
-                    low = mid + 1;
-                }
-                else
-                {
-                    high = mid - 1;
-                }
+                if (midKey < objectKey) low = mid + 1;
+                else high = mid - 1;
             }
 
             value = default;

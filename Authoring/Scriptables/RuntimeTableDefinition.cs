@@ -1,11 +1,8 @@
-using Sirenix.OdinInspector;
 using System;
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
-using XO.PopUtils;
-using XO.RuntimeDatabase;
 
 namespace XO.RuntimeDatabase.Authoring
 {
@@ -38,7 +35,7 @@ namespace XO.RuntimeDatabase.Authoring
 
     /// <summary>
     /// Capability interface for tables that provide or procedurally generate Entity Prefabs.
-    /// Entities collected here are registered into RuntimePrefabCatalog for zero-latency synchronous ECS spawning.
+    /// Entities collected here are registered into PrefabCatalogElement for zero-latency synchronous ECS spawning.
     /// </summary>
     public interface IRuntimePrefabTable : IRuntimeTable
     {
@@ -56,12 +53,12 @@ namespace XO.RuntimeDatabase.Authoring
     /// <summary>
     /// Base ScriptableObject class for all RuntimeDatabase tables.
     /// </summary>
-    public abstract class RuntimeTableSoBase : SerializedScriptableObject, IRuntimeTable
+    public abstract class RuntimeTableSoBase : ScriptableObject, IRuntimeTable
     {
-        [Tooltip("Leave empty to use the asset name as the table key")]
+        [Tooltip("Leave empty to use the asset name as the table key.")]
         public string tableName;
 
-        public uint TableKey => Pop.Hash32(string.IsNullOrEmpty(tableName) ? name : tableName);
+        public uint TableKey => RuntimeDB.Hash32(TableName);
         public string TableName => string.IsNullOrEmpty(tableName) ? name : tableName;
 
         public virtual void BakeTable(Baker<RuntimeDatabaseAuthoring> baker, Entity entity)
@@ -71,7 +68,7 @@ namespace XO.RuntimeDatabase.Authoring
 
     /// <summary>
     /// Generic ScriptableObject table mapping source data (ScriptableObjects, GameObjects, structs)
-    /// into pure unmanaged DOTS flyweight data baked into a RuntimeTable<TDots> blob.
+    /// into pure unmanaged DOTS flyweight data baked into a RuntimeTable&lt;TDots&gt; blob.
     /// </summary>
     public abstract class RuntimeTableSo<TSource, TDots> : RuntimeTableSoBase, IRuntimeTableSo<TDots>
         where TDots : unmanaged
@@ -88,24 +85,31 @@ namespace XO.RuntimeDatabase.Authoring
 
             for (int i = 0; i < data.Length; i++)
             {
-                outKeys.Add(Pop.Hash32(data[i].key));
+                outKeys.Add(RuntimeDB.Hash32(data[i].key));
                 outValues.Add(Convert(data[i].value, baker));
             }
         }
 
         /// <summary>
         /// Automatically called by RuntimeDatabaseAuthoring to combine ALL tables sharing this TDots type
-        /// into a single, high-performance unmanaged RuntimeTable<TDots> singleton.
+        /// into a single, high-performance unmanaged RuntimeTable&lt;TDots&gt; singleton.
         /// </summary>
         public void BakeGroup(Baker<RuntimeDatabaseAuthoring> baker, Entity entity, List<IRuntimeDataTable> tables)
         {
             var typedTables = new List<IRuntimeTableSo<TDots>>();
+            var seenTableKeys = new HashSet<uint>();
+
             for (int i = 0; i < tables.Count; i++)
             {
-                if (tables[i] is IRuntimeTableSo<TDots> typed)
+                if (tables[i] is not IRuntimeTableSo<TDots> typed) continue;
+
+                if (!seenTableKeys.Add(typed.TableKey))
                 {
-                    typedTables.Add(typed);
+                    Debug.LogWarning($"[RuntimeDB] Duplicate table key '{typed.TableName}' (0x{typed.TableKey:X8}) for type {typeof(TDots).Name}. Skipping duplicate table.");
+                    continue;
                 }
+
+                typedTables.Add(typed);
             }
 
             if (typedTables.Count == 0) return;
@@ -130,12 +134,21 @@ namespace XO.RuntimeDatabase.Authoring
                 var tempValues = new List<TDots>();
                 tableSo.GetSubTableData(baker, tempKeys, tempValues);
 
+                var seenObjectKeys = new HashSet<uint>();
                 var subTableEntries = new List<EntryMetadata<TDots>>(tempKeys.Count);
+
                 for (int j = 0; j < tempKeys.Count; j++)
                 {
+                    uint objKey = tempKeys[j];
+                    if (!seenObjectKeys.Add(objKey))
+                    {
+                        Debug.LogWarning($"[RuntimeDB] Duplicate entry key (0x{objKey:X8}) in table '{tableSo.TableName}'. Skipping duplicate entry.");
+                        continue;
+                    }
+
                     subTableEntries.Add(new EntryMetadata<TDots>
                     {
-                        ObjectKey = tempKeys[j],
+                        ObjectKey = objKey,
                         Value = tempValues[j]
                     });
                 }

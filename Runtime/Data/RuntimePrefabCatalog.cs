@@ -1,8 +1,5 @@
 using System.Runtime.CompilerServices;
-using Unity.Burst;
-using Unity.Collections;
 using Unity.Entities;
-using XO.PopUtils;
 
 namespace XO.RuntimeDatabase
 {
@@ -14,7 +11,7 @@ namespace XO.RuntimeDatabase
     }
 
     /// <summary>
-    /// Remappable ECS Buffer Element storing baked Entity Prefabs.
+    /// Remappable ECS Buffer Element storing baked Entity Prefabs sorted by (TableKey, PrefabKey).
     /// Unity automatically remaps PrefabEntity from Baking World to Runtime World during SubScene streaming.
     /// Provides zero-latency synchronous ecb.Instantiate access in Burst systems.
     /// </summary>
@@ -27,35 +24,62 @@ namespace XO.RuntimeDatabase
     }
 
     /// <summary>
-    /// High-performance Burst-compatible lookup extension methods for DynamicBuffer<PrefabCatalogElement>.
+    /// High-performance Burst-compatible lookup extension methods for DynamicBuffer&lt;PrefabCatalogElement&gt;.
     /// </summary>
     public static class PrefabCatalogExtensions
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool TryGetPrefab(this DynamicBuffer<PrefabCatalogElement> catalog, uint tableKey, uint prefabKey, out Entity prefabEntity)
+        public static bool TryGetPrefab(
+            this DynamicBuffer<PrefabCatalogElement> catalog,
+            uint tableKey,
+            uint prefabKey,
+            out Entity prefabEntity)
         {
             int len = catalog.Length;
-            for (int i = 0; i < len; i++)
+            if (len == 0)
             {
-                var elem = catalog[i];
-                if (elem.PrefabKey == prefabKey && (tableKey == 0 || elem.TableKey == tableKey))
+                prefabEntity = Entity.Null;
+                return false;
+            }
+
+            // O(log N) binary search when tableKey is specified (catalog is sorted by TableKey, then PrefabKey)
+            if (tableKey != 0)
+            {
+                int low = 0;
+                int high = len - 1;
+                while (low <= high)
                 {
-                    prefabEntity = elem.PrefabEntity;
-                    return true;
+                    int mid = (low + high) >> 1;
+                    var elem = catalog[mid];
+                    if (elem.TableKey == tableKey)
+                    {
+                        if (elem.PrefabKey == prefabKey)
+                        {
+                            prefabEntity = elem.PrefabEntity;
+                            return true;
+                        }
+                        if (elem.PrefabKey < prefabKey) low = mid + 1;
+                        else high = mid - 1;
+                    }
+                    else if (elem.TableKey < tableKey)
+                    {
+                        low = mid + 1;
+                    }
+                    else
+                    {
+                        high = mid - 1;
+                    }
                 }
             }
 
-            // Fallback: search across any table if specific tableKey didn't match
-            if (tableKey != 0)
+            // Fallback: scan across all tables by prefabKey
+            for (int i = 0; i < len; i++)
             {
-                for (int i = 0; i < len; i++)
+                var elem = catalog[i];
+                if (elem.PrefabKey == prefabKey)
                 {
-                    var elem = catalog[i];
-                    if (elem.PrefabKey == prefabKey)
-                    {
-                        prefabEntity = elem.PrefabEntity;
-                        return true;
-                    }
+                    prefabEntity = elem.PrefabEntity;
+                    return true;
                 }
             }
 
@@ -64,19 +88,27 @@ namespace XO.RuntimeDatabase
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool TryGetPrefab(this DynamicBuffer<PrefabCatalogElement> catalog, uint prefabKey, out Entity prefabEntity)
+        public static bool TryGetPrefab(
+            this DynamicBuffer<PrefabCatalogElement> catalog,
+            uint prefabKey,
+            out Entity prefabEntity)
         {
             return catalog.TryGetPrefab(0, prefabKey, out prefabEntity);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static Entity GetPrefab(this DynamicBuffer<PrefabCatalogElement> catalog, uint tableKey, uint prefabKey)
+        public static Entity GetPrefab(
+            this DynamicBuffer<PrefabCatalogElement> catalog,
+            uint tableKey,
+            uint prefabKey)
         {
             return catalog.TryGetPrefab(tableKey, prefabKey, out var prefab) ? prefab : Entity.Null;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static Entity GetPrefab(this DynamicBuffer<PrefabCatalogElement> catalog, uint prefabKey)
+        public static Entity GetPrefab(
+            this DynamicBuffer<PrefabCatalogElement> catalog,
+            uint prefabKey)
         {
             return catalog.TryGetPrefab(0, prefabKey, out var prefab) ? prefab : Entity.Null;
         }
