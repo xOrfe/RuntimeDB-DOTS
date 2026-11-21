@@ -1,0 +1,28 @@
+{
+  "name": "XO.RuntimeDatabase.Editor",
+  "rootNamespace": "XO.RuntimeDatabase.Editor",
+  "references": [
+    "Unity.Collections",
+    "Unity.Entities",
+    "Unity.Burst",
+    "Unity.Mathematics",
+    "Unity.Scenes",
+    "Unity.Transforms",
+    "XO.RuntimeDatabase",
+    "XO.RuntimeDatabase.Authoring",
+    "XO.PopUtils",
+    "XO.Curve",
+    "XO.Entityween.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

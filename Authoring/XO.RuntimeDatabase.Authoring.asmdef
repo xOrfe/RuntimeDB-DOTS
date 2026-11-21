@@ -1,0 +1,23 @@
+{
+  "name": "XO.RuntimeDatabase.Authoring",
+  "rootNamespace": "XO.RuntimeDatabase.Authoring",
+  "references": [
+    "Unity.Collections",
+    "Unity.Entities",
+    "Unity.Entities.Hybrid",
+    "Unity.Burst",
+    "Unity.Mathematics",
+    "XO.RuntimeDatabase",
+    "XO.PopUtils",
+    "XO.Curve"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

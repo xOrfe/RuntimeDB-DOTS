@@ -1,0 +1,23 @@
+{
+  "name": "XO.RuntimeDatabase",
+  "rootNamespace": "XO.RuntimeDatabase",
+  "references": [
+    "Unity.Collections",
+    "Unity.Entities",
+    "Unity.Burst",
+    "Unity.Mathematics",
+    "Unity.Scenes",
+    "Unity.Transforms",
+    "XO.PopUtils",
+    "XO.Curve"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
