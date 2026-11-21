@@ -1,26 +1,23 @@
-using UnityEngine;
+using System.Collections.Generic;
 using Unity.Entities;
 using Unity.Entities.Serialization;
-using Unity.Mathematics;
-using XO.Curve;
-using XO.PopUtils;
-using XO.RuntimeDatabase;
+using UnityEngine;
 
 namespace XO.RuntimeDatabase.Authoring
 {
-    [CreateAssetMenu(fileName = "GameobjectTable", menuName = "XO/RuntimeDatabase/Tables/GameobjectTable", order = 1)]
+    [CreateAssetMenu(fileName = "PrefabTable", menuName = "XO/RuntimeDatabase/Tables/Prefab Table", order = 1)]
     public class PrefabTableSo : RuntimeTableSo<GameObject, EntityPrefabReference>, IRuntimePrefabTable
     {
         public override EntityPrefabReference Convert(GameObject source, Baker<RuntimeDatabaseAuthoring> baker)
         {
 #if UNITY_EDITOR
-            return new EntityPrefabReference(source);
+            return source != null ? new EntityPrefabReference(source) : default;
 #else
             throw new System.InvalidOperationException("Prefab conversion is an editor baking operation.");
 #endif
         }
 
-        public void CollectPrefabs(Baker<RuntimeDatabaseAuthoring> baker, System.Collections.Generic.List<PrefabEntryMetadata> outPrefabs)
+        public void CollectPrefabs(Baker<RuntimeDatabaseAuthoring> baker, List<PrefabEntryMetadata> outPrefabs)
         {
             if (data == null || data.Length == 0) return;
 
@@ -33,33 +30,11 @@ namespace XO.RuntimeDatabase.Authoring
                     var entityPrefab = baker.GetEntity(entry.value, TransformUsageFlags.Dynamic);
                     outPrefabs.Add(new PrefabEntryMetadata
                     {
-                        PrefabKey = Pop.Hash32(entry.key),
+                        PrefabKey = RuntimeDB.Hash32(entry.key),
                         PrefabEntity = entityPrefab
                     });
                 }
             }
-        }
-    }
-
-    [CreateAssetMenu(fileName = "Float3SplineTable", menuName = "XO/RuntimeDatabase/Tables/Float3SplineTable", order = 2)]
-    public class Float3SplineTableSo : RuntimeTableSo<SerializableSpline<float3>, BlobAssetReference<SplineBlob<float3>>>
-    {
-        public override BlobAssetReference<SplineBlob<float3>> Convert(SerializableSpline<float3> source, Baker<RuntimeDatabaseAuthoring> baker)
-        {
-            var spline = Spline.CreateSplineBlob(source, new Float3Math());
-            baker.AddBlobAsset(ref spline, out var hash);
-            return spline;
-        }
-    }
-
-    [CreateAssetMenu(fileName = "QuaternionSplineTable", menuName = "XO/RuntimeDatabase/Tables/QuaternionSplineTable", order = 3)]
-    public class QuaternionSplineDataTableSo : RuntimeTableSo<SerializableSpline<quaternion>, BlobAssetReference<SplineBlob<quaternion>>>
-    {
-        public override BlobAssetReference<SplineBlob<quaternion>> Convert(SerializableSpline<quaternion> source, Baker<RuntimeDatabaseAuthoring> baker)
-        {
-            var spline = Spline.CreateSplineBlob(source, new QuaternionMath());
-            baker.AddBlobAsset(ref spline, out var hash);
-            return spline;
         }
     }
 }

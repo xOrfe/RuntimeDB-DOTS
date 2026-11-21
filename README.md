@@ -14,17 +14,11 @@ In Unity Package Manager, select **Add package from git URL**:
 https://github.com/xOrfe/RuntimeDB-DOTS.git
 ```
 
-### Additional Dependencies
-
-- [PopUtils](https://github.com/xOrfe/PopUtils) (`com.xorfe.poputils`)
-- [Entityween](https://github.com/xOrfe/Entityween) (`com.xorfe.entityween`, for spline tables)
-- Odin Inspector (`SerializedScriptableObject` for authoring tables)
-
 ---
 
 ## Features
 
 - **`RuntimeTable<TValue>`**: Binary-search unmanaged `BlobAssetReference` tables with $O(\log N)$ Burst-compatible lookups.
-- **`PrefabCatalogElement`**: Zero-latency synchronous ECS prefab lookup and instantiation.
+- **`PrefabCatalogElement`**: Sorted $O(\log N)$ synchronous ECS prefab lookup and instantiation.
 - **`InstantiateEntitySystem`**: Asynchronous `EntityPrefabReference` loading, caching, and instantiation via `InstantiateEntityPrefabCall`.
 - **Authoring & Diagnostics**: `RuntimeDatabaseAuthoring` baker, `RuntimeTableSo<TSource, TDots>` ScriptableObjects, and the **Tools > Runtime Database Viewer** editor window.
